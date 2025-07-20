@@ -1,0 +1,314 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8" />
+    <title>Дашборд</title>
+    <style>
+        body { font-family: Arial, sans-serif; max-width: 700px; margin: 20px auto; }
+        button, input, select { padding: 6px; margin: 4px 4px 4px 0; }
+        ul { padding-left: 20px; }
+        .error { color: red; }
+        .queue-item { cursor: pointer; margin: 4px 0; }
+        .queue-item.selected { font-weight: bold; }
+        label { display: block; margin-top: 10px; }
+        .task { border-bottom: 1px solid #ccc; padding: 6px 0; }
+        textarea {
+            width: 100%;
+            min-height: 60px;
+            margin: 6px 0;
+            padding: 6px;
+            box-sizing: border-box;
+        }
+        .task-buttons {
+            margin-top: 4px;
+        }
+    </style>
+</head>
+<body>
+
+<button id="logoutBtn">Выйти</button>
+<h2>Очереди задач</h2>
+
+<form id="createQueueForm">
+    <input type="text" id="queueName" placeholder="Название очереди" required />
+    <button type="submit">Создать очередь</button>
+</form>
+
+<ul id="queuesList"></ul>
+
+<hr />
+
+<div id="tasksSection" style="display:none;">
+    <h3>Задачи выбранной очереди</h3>
+    <button id="showCreateFormBtn">Создать задачу</button>
+
+    <form id="createTaskForm" style="display: none;">
+        <input type="hidden" id="editingTaskId" />
+        <input type="text" id="taskTitle" placeholder="Название задачи" required />
+        <textarea id="taskDescription" placeholder="Описание"></textarea>
+
+        <label for="assigneeEmail">Исполнитель:</label>
+        <select id="assigneeEmail">
+            <option value="">Не назначен</option>
+        </select>
+
+        <label for="deadline">Дедлайн:</label>
+        <input type="date" id="deadline" />
+
+        <button type="submit">Сохранить задачу</button>
+    </form>
+
+    <ul id="tasksList"></ul>
+</div>
+
+<p class="error" id="error"></p>
+
+<script>
+    const API_URL = 'http://localhost:8080/api';
+
+    function getToken() {
+        return localStorage.getItem('token');
+    }
+
+    function authHeaders() {
+        return {
+            'Content-Type': 'application/json',
+            'Authorization': 'Bearer ' + getToken()
+        };
+    }
+
+    document.getElementById('logoutBtn').onclick = () => {
+        localStorage.removeItem('token');
+        window.location.href = '/';
+    };
+
+    if (!getToken()) {
+        window.location.href = '/';
+    }
+
+    const queuesList = document.getElementById('queuesList');
+    const tasksSection = document.getElementById('tasksSection');
+    const tasksList = document.getElementById('tasksList');
+    const errorEl = document.getElementById('error');
+    const showCreateFormBtn = document.getElementById('showCreateFormBtn');
+    const createTaskForm = document.getElementById('createTaskForm');
+    const assigneeSelect = document.getElementById('assigneeEmail');
+
+    let queues = [];
+    let selectedQueueId = null;
+    let users = [];
+
+    async function loadQueues() {
+        errorEl.textContent = '';
+        try {
+            const res = await fetch(`${API_URL}/queues`, { headers: authHeaders() });
+            if (!res.ok) throw new Error('Ошибка загрузки очередей');
+            queues = await res.json();
+            renderQueues();
+            if (queues.length > 0) {
+                selectQueue(queues[0].id);
+            } else {
+                tasksSection.style.display = 'none';
+            }
+        } catch (e) {
+            errorEl.textContent = e.message;
+        }
+    }
+
+    function renderQueues() {
+        queuesList.innerHTML = '';
+        queues.forEach(q => {
+            const li = document.createElement('li');
+            li.textContent = q.name;
+            li.className = 'queue-item' + (q.id === selectedQueueId ? ' selected' : '');
+            li.onclick = () => selectQueue(q.id);
+            queuesList.appendChild(li);
+        });
+    }
+
+    async function selectQueue(id) {
+        selectedQueueId = id;
+        renderQueues();
+        tasksSection.style.display = 'block';
+        createTaskForm.style.display = 'none';
+        await loadTasks(id);
+    }
+
+    async function loadTasks(queueId) {
+        errorEl.textContent = '';
+        try {
+            const res = await fetch(`${API_URL}/tasks?queueId=${queueId}`, { headers: authHeaders() });
+            if (!res.ok) throw new Error('Ошибка загрузки задач');
+            const tasks = await res.json();
+            renderTasks(tasks);
+        } catch (e) {
+            errorEl.textContent = e.message;
+        }
+    }
+
+    function renderTasks(tasks) {
+        tasksList.innerHTML = '';
+        if (tasks.length === 0) {
+            tasksList.innerHTML = '<li>Задач нет</li>';
+            return;
+        }
+
+        tasks.forEach(task => {
+            const li = document.createElement('li');
+            li.className = 'task';
+            const assignee = users.find(u => u.id === task.assigneeId);
+            li.innerHTML = `
+        <strong>${task.title}</strong><br/>
+        ${task.description || ''}<br/>
+        Статус: ${task.status}<br/>
+        Дедлайн: ${task.deadline ? new Date(task.deadline).toLocaleDateString() : '—'}<br/>
+        Исполнитель: ${assignee ? assignee.email : 'не указан'}<br/>
+        <div class="task-buttons">
+          <button data-id="${task.id}" class="edit-btn">Редактировать</button>
+          <button data-id="${task.id}" class="delete-btn">Удалить</button>
+        </div>
+      `;
+            tasksList.appendChild(li);
+        });
+
+        document.querySelectorAll('.edit-btn').forEach(btn => {
+            btn.onclick = async () => {
+                const taskId = btn.dataset.id;
+                await populateFormForEdit(taskId);
+            };
+        });
+
+        document.querySelectorAll('.delete-btn').forEach(btn => {
+            btn.onclick = async () => {
+                const taskId = btn.dataset.id;
+                if (confirm('Удалить эту задачу?')) {
+                    await deleteTask(taskId);
+                }
+            };
+        });
+    }
+
+    async function deleteTask(id) {
+        errorEl.textContent = '';
+        try {
+            const res = await fetch(`${API_URL}/tasks/${id}`, {
+                method: 'DELETE',
+                headers: authHeaders()
+            });
+            if (!res.ok) throw new Error('Ошибка удаления задачи');
+            await loadTasks(selectedQueueId);
+        } catch (e) {
+            errorEl.textContent = e.message;
+        }
+    }
+
+    async function populateFormForEdit(taskId) {
+        try {
+            const res = await fetch(`${API_URL}/tasks/${taskId}`, { headers: authHeaders() });
+            if (!res.ok) throw new Error('Ошибка загрузки задачи');
+            const task = await res.json();
+
+            document.getElementById('editingTaskId').value = task.id;
+            document.getElementById('taskTitle').value = task.title;
+            document.getElementById('taskDescription').value = task.description || '';
+            document.getElementById('deadline').value = task.deadline ? task.deadline.split('T')[0] : '';
+            assigneeSelect.value = task.assigneeId || '';
+
+            createTaskForm.style.display = 'block';
+            showCreateFormBtn.textContent = 'Создать новую задачу';
+        } catch (e) {
+            errorEl.textContent = e.message;
+        }
+    }
+
+    document.getElementById('createQueueForm').onsubmit = async (e) => {
+        e.preventDefault();
+        errorEl.textContent = '';
+        try {
+            const res = await fetch(`${API_URL}/queues`, {
+                method: 'POST',
+                headers: authHeaders(),
+                body: JSON.stringify({ name: document.getElementById('queueName').value })
+            });
+            if (!res.ok) throw new Error('Ошибка создания очереди');
+            document.getElementById('queueName').value = '';
+            await loadQueues();
+        } catch (e) {
+            errorEl.textContent = e.message;
+        }
+    };
+
+    document.getElementById('createTaskForm').onsubmit = async (e) => {
+        e.preventDefault();
+        errorEl.textContent = '';
+        try {
+            const taskId = document.getElementById('editingTaskId').value;
+            const deadline = document.getElementById('deadline').value;
+            const assigneeId = assigneeSelect.value;
+            const payload = {
+                title: document.getElementById('taskTitle').value,
+                description: document.getElementById('taskDescription').value,
+                assigneeId: assigneeId ? parseInt(assigneeId) : null,
+                deadline: deadline || null
+            };
+
+            let url = `${API_URL}/tasks`;
+            let method = 'POST';
+            if (taskId) {
+                url += `/${taskId}`;
+                method = 'PUT';
+            } else {
+                payload.queueId = selectedQueueId;
+            }
+
+            const res = await fetch(url, {
+                method,
+                headers: authHeaders(),
+                body: JSON.stringify(payload)
+            });
+
+            if (!res.ok) {
+                const errorData = await res.json();
+                throw new Error(errorData.message || 'Ошибка сохранения задачи');
+            }
+
+            createTaskForm.reset();
+            createTaskForm.style.display = 'none';
+            document.getElementById('editingTaskId').value = '';
+            await loadTasks(selectedQueueId);
+        } catch (e) {
+            errorEl.textContent = e.message;
+        }
+    };
+
+    showCreateFormBtn.onclick = () => {
+        document.getElementById('editingTaskId').value = '';
+        createTaskForm.reset();
+        createTaskForm.style.display = 'block';
+    };
+
+    async function loadUsers() {
+        try {
+            const res = await fetch(`${API_URL}/users`, { headers: authHeaders() });
+            if (!res.ok) throw new Error('Ошибка загрузки пользователей');
+            users = await res.json();
+            assigneeSelect.innerHTML = '<option value="">Не назначен</option>';
+            users.forEach(user => {
+                const option = document.createElement('option');
+                option.value = user.id;
+                option.textContent = user.email;
+                assigneeSelect.appendChild(option);
+            });
+        } catch (e) {
+            errorEl.textContent = 'Не удалось загрузить пользователей';
+        }
+    }
+
+    document.addEventListener('DOMContentLoaded', async () => {
+        await loadUsers();
+        await loadQueues();
+    });
+</script>
+
+</body>
+</html>

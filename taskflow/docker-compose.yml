@@ -1,0 +1,39 @@
+version: '3.8'
+
+services:
+  php:
+    build:
+      context: ./docker/php
+    container_name: taskflow-php
+    volumes:
+      - D:/taskflow/api:/var/www/html
+    depends_on:
+      - db
+      - redis
+
+  nginx:
+    image: nginx:alpine
+    container_name: taskflow-nginx
+    ports:
+      - "8080:80"
+    volumes:
+      - D:/taskflow/api:/var/www/html
+      - ./docker/nginx/default.conf:/etc/nginx/conf.d/default.conf
+    depends_on:
+      - php
+
+  db:
+    image: postgres:15
+    container_name: taskflow-db
+    environment:
+      POSTGRES_USER: symfony
+      POSTGRES_PASSWORD: secret
+      POSTGRES_DB: taskflow
+    ports:
+      - "5432:5432"
+
+  redis:
+    image: redis:alpine
+    container_name: taskflow-redis
+    ports:
+      - "6379:6379"
